@@ -98,7 +98,7 @@ export default function App() {
       formData.append("boxes", JSON.stringify(boxes));
 
       // Talk to Python server
-      const response = await axios.post('http://127.0.0.1:8000/scan', formData);
+      const response = await axios.post('https://arvee120-my-ocr-brain.hf.space/scan', formData);
       setResults(response.data.data);
     } catch (error) {
       console.error(error);
