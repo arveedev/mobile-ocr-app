@@ -36,7 +36,7 @@ export default function App() {
     return () => clearInterval(checkCV);
   }, []);
 
-  // LIVE LASER GUIDE
+  // LIVE LASER GUIDE WITH VISUAL FEEDBACK
   const startVideoLoop = () => {
     const processFrame = () => {
       if (webcamRef.current && webcamRef.current.video && webcamRef.current.video.readyState === 4) {
@@ -47,6 +47,8 @@ export default function App() {
         const ctx = canvas.getContext('2d');
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
+        
+        // Draw the live video feed onto the canvas
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
         try {
@@ -57,7 +59,6 @@ export default function App() {
           window.cv.GaussianBlur(gray, gray, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
           window.cv.Canny(gray, gray, 50, 150, 3, false);
           
-          // Dilate the edges slightly to connect broken lines
           let M_dilate = window.cv.Mat.ones(3, 3, window.cv.CV_8U);
           window.cv.dilate(gray, gray, M_dilate, new window.cv.Point(-1, -1), 1, window.cv.BORDER_CONSTANT, window.cv.morphologyDefaultBorderValue());
 
@@ -66,41 +67,67 @@ export default function App() {
           window.cv.findContours(gray, contours, hierarchy, window.cv.RETR_EXTERNAL, window.cv.CHAIN_APPROX_SIMPLE);
           
           let maxArea = 0;
-          let docContour = null;
+          let bestContour = null;
+          let isPerfectSquare = false;
           
           for (let i = 0; i < contours.size(); ++i) {
             let cnt = contours.get(i);
             let area = window.cv.contourArea(cnt);
-            if (area > (canvas.width * canvas.height * 0.10)) { 
+            
+            // Only look at large objects (at least 10% of the screen)
+            if (area > (canvas.width * canvas.height * 0.10) && area > maxArea) { 
               let approx = new window.cv.Mat();
               let peri = window.cv.arcLength(cnt, true);
-              window.cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
               
-              if (approx.rows === 4 && area > maxArea) {
+              // 0.05 is more forgiving, forces noisy edges into 4 neat corners
+              window.cv.approxPolyDP(cnt, approx, 0.05 * peri, true);
+              
+              if (bestContour) bestContour.delete();
+              
+              // If it found 4 corners perfectly, it's green. Otherwise, yellow.
+              if (approx.rows === 4) {
+                bestContour = approx.clone();
+                isPerfectSquare = true;
                 maxArea = area;
-                if (docContour) docContour.delete();
-                docContour = approx.clone();
+              } else {
+                bestContour = approx.clone();
+                isPerfectSquare = false;
+                maxArea = area;
               }
               approx.delete();
             }
           }
           
-          if (docContour) {
-            ctx.strokeStyle = "#00ff00"; 
-            ctx.lineWidth = 4;
+          if (bestContour) {
+            // Yellow if searching for corners, Green if locked on 4 corners
+            ctx.strokeStyle = isPerfectSquare ? "#00ff00" : "#ffcc00"; 
+            ctx.lineWidth = 6;
             ctx.beginPath();
-            ctx.moveTo(docContour.data32S[0], docContour.data32S[1]);
-            for (let i = 1; i < 4; i++) {
-              ctx.lineTo(docContour.data32S[i * 2], docContour.data32S[i * 2 + 1]);
+            
+            let pts = bestContour.rows;
+            for (let i = 0; i < pts; i++) {
+              let x = bestContour.data32S[i * 2];
+              let y = bestContour.data32S[i * 2 + 1];
+              if (i === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
             }
             ctx.closePath();
             ctx.stroke();
-            docContour.delete();
+
+            // Draw bright dots on the corners for a cool "scanning" effect
+            ctx.fillStyle = isPerfectSquare ? "#00ff00" : "#ffcc00";
+            for (let i = 0; i < pts; i++) {
+              ctx.beginPath();
+              ctx.arc(bestContour.data32S[i * 2], bestContour.data32S[i * 2 + 1], 8, 0, 2 * Math.PI);
+              ctx.fill();
+            }
+            
+            bestContour.delete();
           }
           
           src.delete(); gray.delete(); M_dilate.delete(); contours.delete(); hierarchy.delete();
         } catch (err) {
-          // Ignore frame errors
+          // Keep running even if a single frame drops
         }
       }
       requestAnimationFrame(processFrame);
@@ -145,7 +172,8 @@ export default function App() {
           let area = window.cv.contourArea(cnt);
           if (area > 10000) {
             let approx = new window.cv.Mat();
-            window.cv.approxPolyDP(cnt, approx, 0.02 * window.cv.arcLength(cnt, true), true);
+            // Loosened the strictness here too, so the capture actually matches the green box you see
+            window.cv.approxPolyDP(cnt, approx, 0.05 * window.cv.arcLength(cnt, true), true);
             if (approx.rows === 4 && area > maxArea) {
               maxArea = area;
               if (docContour) docContour.delete();
@@ -158,7 +186,6 @@ export default function App() {
         let finalMat = new window.cv.Mat();
         
         if (docContour) {
-          // Flatten based on detected corners
           let pts = [];
           for (let i = 0; i < 4; i++) {
             pts.push({ x: docContour.data32S[i * 2], y: docContour.data32S[i * 2 + 1] });
@@ -179,11 +206,8 @@ export default function App() {
           
           srcTri.delete(); dstTri.delete(); M.delete(); docContour.delete();
         } else {
-          // If no edges found, don't warp. Just resize cleanly.
           window.cv.resize(src, finalMat, new window.cv.Size(EXPORT_WIDTH, EXPORT_HEIGHT));
         }
-
-        // REMOVED HARSH B&W THRESHOLD. We keep the clean, flattened color image for better OCR.
         
         const canvas = processedCanvasRef.current;
         canvas.width = EXPORT_WIDTH;
@@ -258,7 +282,6 @@ export default function App() {
       const blob = await res.blob();
       const file = new File([blob], "scan.jpg", { type: "image/jpeg" });
 
-      // Convert percentage boxes to EXACT absolute pixel coordinates to fix the mismatch
       const absoluteBoxes = boxes.map(b => ({
         name: b.name,
         x: Math.round(b.x * EXPORT_WIDTH),
@@ -294,7 +317,6 @@ export default function App() {
   };
 
   return (
-    // Changed to h-[100dvh] and strictly flex-col to fix mobile scrolling issues
     <div className="max-w-md mx-auto h-[100dvh] bg-slate-900 text-white p-4 font-sans flex flex-col">
       
       <div className="bg-slate-800 p-3 rounded shadow-md mb-3 flex items-center justify-between shrink-0">
@@ -318,18 +340,18 @@ export default function App() {
               videoConstraints={{ facingMode: "environment" }}
               className="absolute inset-0 w-full h-full object-cover opacity-0" 
             />
-            {/* The canvas displays the actual video feed so we can draw the green box on it */}
+            {/* The canvas displays the actual video feed AND the bounding box */}
             <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
             
-            <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs text-green-400 animate-pulse">
-              {cvReady ? "● EDGE TRACKER ACTIVE" : "LOADING..."}
+            <div className="absolute top-2 left-2 bg-black/80 px-2 py-1 rounded text-xs text-white shadow font-bold tracking-wider animate-pulse">
+              {cvReady ? "🟢 LASER GUIDE ON" : "⚪ LOADING AI..."}
             </div>
           </div>
           
           <button 
             onClick={captureAndCleanDocument}
             disabled={!cvReady}
-            className="w-full shrink-0 bg-emerald-600 text-white py-4 rounded-xl font-bold text-lg shadow-lg mb-2"
+            className="w-full shrink-0 bg-emerald-600 text-white py-4 rounded-xl font-bold text-lg shadow-lg mb-2 transition-transform active:scale-95"
           >
             📸 Capture Paper
           </button>
@@ -347,7 +369,6 @@ export default function App() {
             onMouseDown={startDrawing} onMouseMove={drawMove} onMouseUp={endDrawing}
             onTouchStart={startDrawing} onTouchMove={drawMove} onTouchEnd={endDrawing}
           >
-            {/* object-contain ensures the image fits inside the box without stretching, maintaining proper aspect ratio for the bounding boxes */}
             <img src={enhancedImage} alt="Cleaned doc" className="w-full h-full object-contain block pointer-events-none" />
             
             {boxes.map((box) => (
