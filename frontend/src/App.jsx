@@ -18,10 +18,12 @@ export default function App() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
   const [currentBox, setCurrentBox] = useState(null);
+  
+  // NEW: State to track original AI guesses vs User edits
   const [ocrResults, setOcrResults] = useState(null);
+  const [originalResults, setOriginalResults] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Constants for standardizing image size sent to backend
   const EXPORT_WIDTH = 800;
   const EXPORT_HEIGHT = 1100;
 
@@ -36,7 +38,6 @@ export default function App() {
     return () => clearInterval(checkCV);
   }, []);
 
-  // LIVE LASER GUIDE WITH VISUAL FEEDBACK
   const startVideoLoop = () => {
     const processFrame = () => {
       if (webcamRef.current && webcamRef.current.video && webcamRef.current.video.readyState === 4) {
@@ -48,7 +49,6 @@ export default function App() {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         
-        // Draw the live video feed onto the canvas
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
         try {
@@ -74,17 +74,14 @@ export default function App() {
             let cnt = contours.get(i);
             let area = window.cv.contourArea(cnt);
             
-            // Only look at large objects (at least 10% of the screen)
             if (area > (canvas.width * canvas.height * 0.10) && area > maxArea) { 
               let approx = new window.cv.Mat();
               let peri = window.cv.arcLength(cnt, true);
               
-              // 0.05 is more forgiving, forces noisy edges into 4 neat corners
               window.cv.approxPolyDP(cnt, approx, 0.05 * peri, true);
               
               if (bestContour) bestContour.delete();
               
-              // If it found 4 corners perfectly, it's green. Otherwise, yellow.
               if (approx.rows === 4) {
                 bestContour = approx.clone();
                 isPerfectSquare = true;
@@ -99,7 +96,6 @@ export default function App() {
           }
           
           if (bestContour) {
-            // Yellow if searching for corners, Green if locked on 4 corners
             ctx.strokeStyle = isPerfectSquare ? "#00ff00" : "#ffcc00"; 
             ctx.lineWidth = 6;
             ctx.beginPath();
@@ -114,7 +110,6 @@ export default function App() {
             ctx.closePath();
             ctx.stroke();
 
-            // Draw bright dots on the corners for a cool "scanning" effect
             ctx.fillStyle = isPerfectSquare ? "#00ff00" : "#ffcc00";
             for (let i = 0; i < pts; i++) {
               ctx.beginPath();
@@ -127,7 +122,7 @@ export default function App() {
           
           src.delete(); gray.delete(); M_dilate.delete(); contours.delete(); hierarchy.delete();
         } catch (err) {
-          // Keep running even if a single frame drops
+          // ignore dropped frames
         }
       }
       requestAnimationFrame(processFrame);
@@ -172,7 +167,6 @@ export default function App() {
           let area = window.cv.contourArea(cnt);
           if (area > 10000) {
             let approx = new window.cv.Mat();
-            // Loosened the strictness here too, so the capture actually matches the green box you see
             window.cv.approxPolyDP(cnt, approx, 0.05 * window.cv.arcLength(cnt, true), true);
             if (approx.rows === 4 && area > maxArea) {
               maxArea = area;
@@ -293,15 +287,43 @@ export default function App() {
       const formData = new FormData();
       formData.append("image", file);
       formData.append("boxes", JSON.stringify(absoluteBoxes));
+      formData.append("template_name", templateName); // NEW: Send the document profile
 
       const response = await axios.post('https://arvee120-my-ocr-brain.hf.space/scan', formData);
+      
+      // Store both the editable copy and the original AI copy
       setOcrResults(response.data.data);
+      setOriginalResults(response.data.data);
       setMode('results');
     } catch (err) {
       console.error(err);
       alert("Error reading document. Make sure your HuggingFace backend is awake.");
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  // NEW FUNCTION: Send correction to backend to learn
+  const teachApp = async (key) => {
+    const originalText = originalResults[key];
+    const newText = ocrResults[key];
+    
+    if (originalText === newText) return; // Nothing changed
+
+    try {
+      await axios.post('https://arvee120-my-ocr-brain.hf.space/correct', {
+        template_name: templateName,
+        field_name: key,
+        original_text: originalText,
+        corrected_text: newText
+      });
+      
+      // Update original so button hides, proving it was saved
+      setOriginalResults({...originalResults, [key]: newText});
+      alert(`Learned! Next time I see "${originalText}" in this box, I will auto-correct it to "${newText}".`);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to teach the app.");
     }
   };
 
@@ -340,7 +362,6 @@ export default function App() {
               videoConstraints={{ facingMode: "environment" }}
               className="absolute inset-0 w-full h-full object-cover opacity-0" 
             />
-            {/* The canvas displays the actual video feed AND the bounding box */}
             <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
             
             <div className="absolute top-2 left-2 bg-black/80 px-2 py-1 rounded text-xs text-white shadow font-bold tracking-wider animate-pulse">
@@ -409,12 +430,30 @@ export default function App() {
       {mode === 'results' && (
         <div className="flex-1 flex flex-col min-h-0 gap-4">
           <div className="flex-1 bg-slate-800 rounded-xl p-4 shadow-xl overflow-y-auto">
-            <h2 className="text-md font-bold text-green-400 mb-3">✓ EXTRACTED DATA:</h2>
+            <h2 className="text-md font-bold text-green-400 mb-3">✓ EXTRACTED DATA (EDITABLE):</h2>
             <div className="space-y-3">
+              {/* NEW: Editable Input Fields instead of static text */}
               {ocrResults && Object.entries(ocrResults).map(([key, val]) => (
-                <div key={key} className="bg-slate-900 p-3 rounded font-mono">
-                  <div className="text-[11px] text-slate-500 font-bold">{key}</div>
-                  <div className="text-white text-sm mt-1">{val || "[Unreadable]"}</div>
+                <div key={key} className="bg-slate-900 p-3 rounded font-mono flex flex-col gap-2">
+                  <div className="text-[11px] text-slate-500 font-bold uppercase">{key}</div>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      value={val || ""}
+                      onChange={(e) => setOcrResults({...ocrResults, [key]: e.target.value})}
+                      className="flex-1 bg-slate-800 text-white border border-slate-700 rounded px-2 py-2 text-sm outline-none focus:border-emerald-500"
+                    />
+                    
+                    {/* Show "Teach App" button ONLY if the user changed the text */}
+                    {originalResults[key] !== ocrResults[key] && (
+                      <button 
+                        onClick={() => teachApp(key)}
+                        className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1 rounded text-xs font-bold transition-colors"
+                      >
+                        Teach App
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
