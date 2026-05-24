@@ -1,15 +1,11 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import axios from 'axios';
 
 export default function App() {
   const webcamRef = useRef(null);
-  const canvasRef = useRef(null);
-  const processedCanvasRef = useRef(null);
-  
-  const [cvReady, setCvReady] = useState(false);
   const [mode, setMode] = useState('camera'); 
-  const [enhancedImage, setEnhancedImage] = useState(null);
+  const [capturedImage, setCapturedImage] = useState(null);
   
   const [templateName, setTemplateName] = useState('docu1');
   const [savedTemplates, setSavedTemplates] = useState({});
@@ -19,208 +15,36 @@ export default function App() {
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
   const [currentBox, setCurrentBox] = useState(null);
   
-  // NEW: State to track original AI guesses vs User edits
   const [ocrResults, setOcrResults] = useState(null);
   const [originalResults, setOriginalResults] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  const EXPORT_WIDTH = 800;
-  const EXPORT_HEIGHT = 1100;
+  // We capture at a standard high-res size so coordinates always match
+  const EXPORT_WIDTH = 1080;
+  const EXPORT_HEIGHT = 1440;
 
-  useEffect(() => {
-    const checkCV = setInterval(() => {
-      if (window.cv && window.cv.Mat) {
-        setCvReady(true);
-        clearInterval(checkCV);
-        startVideoLoop();
-      }
-    }, 200);
-    return () => clearInterval(checkCV);
-  }, []);
-
-  const startVideoLoop = () => {
-    const processFrame = () => {
-      if (webcamRef.current && webcamRef.current.video && webcamRef.current.video.readyState === 4) {
-        const video = webcamRef.current.video;
-        const canvas = canvasRef.current;
-        if (!canvas) return requestAnimationFrame(processFrame);
-        
-        const ctx = canvas.getContext('2d');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        
-        try {
-          let src = window.cv.imread(canvas);
-          let gray = new window.cv.Mat();
-          
-          window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY, 0);
-          window.cv.GaussianBlur(gray, gray, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
-          window.cv.Canny(gray, gray, 50, 150, 3, false);
-          
-          let M_dilate = window.cv.Mat.ones(3, 3, window.cv.CV_8U);
-          window.cv.dilate(gray, gray, M_dilate, new window.cv.Point(-1, -1), 1, window.cv.BORDER_CONSTANT, window.cv.morphologyDefaultBorderValue());
-
-          let contours = new window.cv.MatVector();
-          let hierarchy = new window.cv.Mat();
-          window.cv.findContours(gray, contours, hierarchy, window.cv.RETR_EXTERNAL, window.cv.CHAIN_APPROX_SIMPLE);
-          
-          let maxArea = 0;
-          let bestContour = null;
-          let isPerfectSquare = false;
-          
-          for (let i = 0; i < contours.size(); ++i) {
-            let cnt = contours.get(i);
-            let area = window.cv.contourArea(cnt);
-            
-            if (area > (canvas.width * canvas.height * 0.10) && area > maxArea) { 
-              let approx = new window.cv.Mat();
-              let peri = window.cv.arcLength(cnt, true);
-              
-              window.cv.approxPolyDP(cnt, approx, 0.05 * peri, true);
-              
-              if (bestContour) bestContour.delete();
-              
-              if (approx.rows === 4) {
-                bestContour = approx.clone();
-                isPerfectSquare = true;
-                maxArea = area;
-              } else {
-                bestContour = approx.clone();
-                isPerfectSquare = false;
-                maxArea = area;
-              }
-              approx.delete();
-            }
-          }
-          
-          if (bestContour) {
-            ctx.strokeStyle = isPerfectSquare ? "#00ff00" : "#ffcc00"; 
-            ctx.lineWidth = 6;
-            ctx.beginPath();
-            
-            let pts = bestContour.rows;
-            for (let i = 0; i < pts; i++) {
-              let x = bestContour.data32S[i * 2];
-              let y = bestContour.data32S[i * 2 + 1];
-              if (i === 0) ctx.moveTo(x, y);
-              else ctx.lineTo(x, y);
-            }
-            ctx.closePath();
-            ctx.stroke();
-
-            ctx.fillStyle = isPerfectSquare ? "#00ff00" : "#ffcc00";
-            for (let i = 0; i < pts; i++) {
-              ctx.beginPath();
-              ctx.arc(bestContour.data32S[i * 2], bestContour.data32S[i * 2 + 1], 8, 0, 2 * Math.PI);
-              ctx.fill();
-            }
-            
-            bestContour.delete();
-          }
-          
-          src.delete(); gray.delete(); M_dilate.delete(); contours.delete(); hierarchy.delete();
-        } catch (err) {
-          // ignore dropped frames
-        }
-      }
-      requestAnimationFrame(processFrame);
-    };
-    requestAnimationFrame(processFrame);
-  };
-
-  const orderPoints = (pts) => {
-    let sortedX = [...pts].sort((a, b) => a.x - b.x);
-    let left = [sortedX[0], sortedX[1]].sort((a, b) => a.y - b.y);
-    let right = [sortedX[2], sortedX[3]].sort((a, b) => a.y - b.y);
-    return [left[0], right[0], right[1], left[1]]; 
-  };
-
-  const captureAndCleanDocument = () => {
+  const captureDocument = () => {
     if (!webcamRef.current) return;
     const screenshot = webcamRef.current.getScreenshot();
     
+    // Instead of glitchy auto-cropping, we just take the high-res photo directly
     const img = new Image();
     img.src = screenshot;
     img.onload = () => {
-      try {
-        let src = window.cv.imread(img);
-        let gray = new window.cv.Mat();
-        
-        window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY, 0);
-        window.cv.GaussianBlur(gray, gray, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
-        window.cv.Canny(gray, gray, 50, 150, 3, false);
-        
-        let M_dilate = window.cv.Mat.ones(3, 3, window.cv.CV_8U);
-        window.cv.dilate(gray, gray, M_dilate, new window.cv.Point(-1, -1), 1, window.cv.BORDER_CONSTANT, window.cv.morphologyDefaultBorderValue());
-
-        let contours = new window.cv.MatVector();
-        let hierarchy = new window.cv.Mat();
-        window.cv.findContours(gray, contours, hierarchy, window.cv.RETR_EXTERNAL, window.cv.CHAIN_APPROX_SIMPLE);
-        
-        let maxArea = 0;
-        let docContour = null;
-        
-        for (let i = 0; i < contours.size(); ++i) {
-          let cnt = contours.get(i);
-          let area = window.cv.contourArea(cnt);
-          if (area > 10000) {
-            let approx = new window.cv.Mat();
-            window.cv.approxPolyDP(cnt, approx, 0.05 * window.cv.arcLength(cnt, true), true);
-            if (approx.rows === 4 && area > maxArea) {
-              maxArea = area;
-              if (docContour) docContour.delete();
-              docContour = approx.clone();
-            }
-            approx.delete();
-          }
-        }
-        
-        let finalMat = new window.cv.Mat();
-        
-        if (docContour) {
-          let pts = [];
-          for (let i = 0; i < 4; i++) {
-            pts.push({ x: docContour.data32S[i * 2], y: docContour.data32S[i * 2 + 1] });
-          }
-          let ordered = orderPoints(pts);
-          
-          let srcTri = window.cv.matFromArray(4, 1, window.cv.CV_32FC2, [
-            ordered[0].x, ordered[0].y, ordered[1].x, ordered[1].y,
-            ordered[2].x, ordered[2].y, ordered[3].x, ordered[3].y
-          ]);
-          
-          let dstTri = window.cv.matFromArray(4, 1, window.cv.CV_32FC2, [
-            0, 0, EXPORT_WIDTH, 0, EXPORT_WIDTH, EXPORT_HEIGHT, 0, EXPORT_HEIGHT
-          ]);
-          
-          let M = window.cv.getPerspectiveTransform(srcTri, dstTri);
-          window.cv.warpPerspective(src, finalMat, M, new window.cv.Size(EXPORT_WIDTH, EXPORT_HEIGHT));
-          
-          srcTri.delete(); dstTri.delete(); M.delete(); docContour.delete();
-        } else {
-          window.cv.resize(src, finalMat, new window.cv.Size(EXPORT_WIDTH, EXPORT_HEIGHT));
-        }
-        
-        const canvas = processedCanvasRef.current;
-        canvas.width = EXPORT_WIDTH;
-        canvas.height = EXPORT_HEIGHT;
-        window.cv.imshow(canvas, finalMat);
-        
-        setEnhancedImage(canvas.toDataURL('image/jpeg', 1.0));
-        
-        src.delete(); gray.delete(); M_dilate.delete(); contours.delete(); hierarchy.delete(); finalMat.delete();
-        
-        setMode('tagging');
-        if (savedTemplates[templateName]) {
-          setBoxes(savedTemplates[templateName]);
-        } else {
-          setBoxes([]);
-        }
-      } catch (err) {
-        console.error("Processing failed", err);
-        alert("Image processing failed.");
+      const canvas = document.createElement('canvas');
+      canvas.width = EXPORT_WIDTH;
+      canvas.height = EXPORT_HEIGHT;
+      const ctx = canvas.getContext('2d');
+      
+      // Draw the image filling our standard canvas
+      ctx.drawImage(img, 0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+      setCapturedImage(canvas.toDataURL('image/jpeg', 0.9));
+      
+      setMode('tagging');
+      if (savedTemplates[templateName]) {
+        setBoxes(savedTemplates[templateName]);
+      } else {
+        setBoxes([]);
       }
     };
   };
@@ -272,7 +96,7 @@ export default function App() {
     if (boxes.length === 0) return alert("Please draw at least one box.");
     setIsProcessing(true);
     try {
-      const res = await fetch(enhancedImage);
+      const res = await fetch(capturedImage);
       const blob = await res.blob();
       const file = new File([blob], "scan.jpg", { type: "image/jpeg" });
 
@@ -287,11 +111,10 @@ export default function App() {
       const formData = new FormData();
       formData.append("image", file);
       formData.append("boxes", JSON.stringify(absoluteBoxes));
-      formData.append("template_name", templateName); // NEW: Send the document profile
+      formData.append("template_name", templateName);
 
       const response = await axios.post('https://arvee120-my-ocr-brain.hf.space/scan', formData);
       
-      // Store both the editable copy and the original AI copy
       setOcrResults(response.data.data);
       setOriginalResults(response.data.data);
       setMode('results');
@@ -303,12 +126,11 @@ export default function App() {
     }
   };
 
-  // NEW FUNCTION: Send correction to backend to learn
   const teachApp = async (key) => {
     const originalText = originalResults[key];
     const newText = ocrResults[key];
     
-    if (originalText === newText) return; // Nothing changed
+    if (originalText === newText) return; 
 
     try {
       await axios.post('https://arvee120-my-ocr-brain.hf.space/correct', {
@@ -318,7 +140,6 @@ export default function App() {
         corrected_text: newText
       });
       
-      // Update original so button hides, proving it was saved
       setOriginalResults({...originalResults, [key]: newText});
       alert(`Learned! Next time I see "${originalText}" in this box, I will auto-correct it to "${newText}".`);
     } catch (err) {
@@ -353,28 +174,29 @@ export default function App() {
 
       {mode === 'camera' && (
         <div className="flex-1 flex flex-col min-h-0">
-          <div className="flex-1 relative rounded-xl overflow-hidden border-2 border-slate-700 bg-black mb-4">
+          <div className="flex-1 relative rounded-xl overflow-hidden bg-black mb-4 flex justify-center items-center">
             <Webcam 
               audio={false} 
               ref={webcamRef} 
               screenshotFormat="image/jpeg"
               screenshotQuality={1}
-              videoConstraints={{ facingMode: "environment" }}
-              className="absolute inset-0 w-full h-full object-cover opacity-0" 
+              videoConstraints={{ facingMode: "environment", aspectRatio: 3/4 }}
+              className="absolute inset-0 w-full h-full object-cover" 
             />
-            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
             
-            <div className="absolute top-2 left-2 bg-black/80 px-2 py-1 rounded text-xs text-white shadow font-bold tracking-wider animate-pulse">
-              {cvReady ? "🟢 LASER GUIDE ON" : "⚪ LOADING AI..."}
+            {/* STATIC ALIGNMENT GUIDE */}
+            <div className="absolute inset-4 border-2 border-dashed border-white/70 rounded-lg pointer-events-none flex flex-col justify-center items-center">
+               <div className="bg-black/50 px-3 py-1 rounded text-white text-xs font-bold tracking-wider mb-2">
+                 ALIGN DOCUMENT INSIDE LINES
+               </div>
             </div>
           </div>
           
           <button 
-            onClick={captureAndCleanDocument}
-            disabled={!cvReady}
+            onClick={captureDocument}
             className="w-full shrink-0 bg-emerald-600 text-white py-4 rounded-xl font-bold text-lg shadow-lg mb-2 transition-transform active:scale-95"
           >
-            📸 Capture Paper
+            📸 Capture Document
           </button>
         </div>
       )}
@@ -382,7 +204,7 @@ export default function App() {
       {mode === 'tagging' && (
         <div className="flex-1 flex flex-col min-h-0 gap-3">
           <div className="text-center shrink-0">
-            <span className="bg-emerald-500/20 text-emerald-400 text-xs px-2 py-1 rounded font-bold">FLATTENED IMAGE</span>
+            <span className="bg-emerald-500/20 text-emerald-400 text-xs px-2 py-1 rounded font-bold">DRAW EXTRACTION BOXES</span>
           </div>
 
           <div 
@@ -390,7 +212,7 @@ export default function App() {
             onMouseDown={startDrawing} onMouseMove={drawMove} onMouseUp={endDrawing}
             onTouchStart={startDrawing} onTouchMove={drawMove} onTouchEnd={endDrawing}
           >
-            <img src={enhancedImage} alt="Cleaned doc" className="w-full h-full object-contain block pointer-events-none" />
+            <img src={capturedImage} alt="Captured doc" className="w-full h-full object-cover block pointer-events-none" />
             
             {boxes.map((box) => (
               <div 
@@ -413,16 +235,16 @@ export default function App() {
           </div>
 
           <div className="grid grid-cols-2 gap-2 shrink-0">
-            <button onClick={() => setMode('camera')} className="bg-slate-800 py-3 rounded-xl font-bold text-sm">Retake</button>
+            <button onClick={() => setMode('camera')} className="bg-slate-800 py-3 rounded-xl font-bold text-sm">Retake Photo</button>
             <button onClick={() => setBoxes([])} className="bg-rose-900/50 text-rose-400 py-3 rounded-xl font-bold text-sm">Clear Boxes</button>
           </div>
 
           <button 
             onClick={sendToBackendAI}
             disabled={isProcessing}
-            className="w-full shrink-0 bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg mb-2"
+            className="w-full shrink-0 bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg mb-2 flex justify-center items-center gap-2"
           >
-            {isProcessing ? "Reading..." : "Read Taught Variables"}
+            {isProcessing ? "Reading Document..." : "Read Taught Variables"}
           </button>
         </div>
       )}
@@ -432,7 +254,6 @@ export default function App() {
           <div className="flex-1 bg-slate-800 rounded-xl p-4 shadow-xl overflow-y-auto">
             <h2 className="text-md font-bold text-green-400 mb-3">✓ EXTRACTED DATA (EDITABLE):</h2>
             <div className="space-y-3">
-              {/* NEW: Editable Input Fields instead of static text */}
               {ocrResults && Object.entries(ocrResults).map(([key, val]) => (
                 <div key={key} className="bg-slate-900 p-3 rounded font-mono flex flex-col gap-2">
                   <div className="text-[11px] text-slate-500 font-bold uppercase">{key}</div>
@@ -444,7 +265,6 @@ export default function App() {
                       className="flex-1 bg-slate-800 text-white border border-slate-700 rounded px-2 py-2 text-sm outline-none focus:border-emerald-500"
                     />
                     
-                    {/* Show "Teach App" button ONLY if the user changed the text */}
                     {originalResults[key] !== ocrResults[key] && (
                       <button 
                         onClick={() => teachApp(key)}
@@ -476,8 +296,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      <canvas ref={processedCanvasRef} className="hidden" />
     </div>
   );
 }
